@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+option go_package = "github.com/elfiyang16/sgrol-ma/proto/echo";
+
+package echo; // optional
+
+message EchoRequest {
+  string message = 1;
+}
+
+// EchoResponse is the response for echo.
+message EchoResponse {
+  string message = 1;
+}
+
+service Echo {
+    rpc UnaryEcho(EchoRequest) returns (EchoResponse) {}
+    rpc ServerStreamingEcho(EchoRequest) returns (stream EchoResponse) {}
+    rpc ClientStreamingEcho(stream EchoRequest) returns (EchoResponse) {}
+    rpc BidirectionalStreamingEcho(stream EchoRequest) returns (stream EchoResponse) {}
+}
