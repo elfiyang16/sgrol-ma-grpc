@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -33,6 +34,26 @@ type ecServer struct {
 
 func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
 	return &pb.EchoResponse{Message: req.Message}, nil
+}
+
+// Where this stream coming from?
+// Server set up methods, and client calls on stub
+func (s *ecServer) BidirectionalStreamingEcho(stream pb.Echo_BidirectionalStreamingEchoServer) error {
+	for {
+		in, err := stream.Recv() // Why it's a pointer to the request thought?
+		if err != nil {
+			fmt.Printf("server: error receiving from stream: %v\n", err)
+			if err == io.EOF { // the stream is closed by the client
+				return nil
+			}
+			return err
+		}
+		fmt.Printf("echoing message %q\n", in.Message)
+		err = stream.Send(&pb.EchoResponse{Message: in.GetMessage()})
+		if err != nil {
+			fmt.Printf("server: error sending to stream: %v\n", err)
+		}
+	}
 }
 
 func valid(authorization []string) bool {
@@ -70,12 +91,15 @@ func main() {
 		grpc.Creds(credentials.NewServerTLSFromCert(&cert)),
 	}
 	s := grpc.NewServer(opts...)
+
 	// Register EchoService service.
 	pb.RegisterEchoServer(s, &ecServer{})
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
