@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/elfiyang16/sgrol-ma/data"
 	"google.golang.org/grpc"
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/elfiyang16/sgrol-ma/proto/github.com/elfiyang16/sgrol-ma/proto/echo"
+	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
 var (
@@ -31,9 +33,31 @@ var port = flag.Int("port", 50051, "the port to serve on")
 
 type ecServer struct {
 	pb.UnimplementedEchoServer
+	count map[string]int
+	mu    sync.Mutex
 }
 
 func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count[req.Message]++
+	// track the number of time a message is repeated
+	if s.count[req.Message] > 2 {
+		st := status.New(codes.ResourceExhausted, "message is repeated")
+		// append details to the status
+		ds, err := st.WithDetails(
+			&errPb.QuotaFailure{
+				Violations: []*errPb.QuotaFailure_Violation{{
+					Subject:     fmt.Sprintf("message: %s", req.GetMessage()),
+					Description: "Limit on number of times a message can be repeated reached",
+				}},
+			},
+		)
+		if err != nil {
+			return nil, st.Err()
+		}
+		return nil, ds.Err()
+	}
 	return &pb.EchoResponse{Message: req.Message}, nil
 }
 
@@ -94,7 +118,8 @@ func main() {
 	s := grpc.NewServer(opts...)
 
 	// Register EchoService service.
-	pb.RegisterEchoServer(s, &ecServer{})
+	// pb.RegisterEchoServer(s, &ecServer{})
+	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

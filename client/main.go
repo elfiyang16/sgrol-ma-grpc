@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	// Interesting, move in & out, and have to have this weird aming for protoc to work
@@ -18,7 +19,9 @@ import (
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/status"
+
 	// pb "github.com/elfiyang16/sgrol-ma/proto/echo"
+	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
 var addr = flag.String("addr", "localhost:50051", "http service address")
@@ -75,6 +78,25 @@ func callUnaryWithGzip(client pb.EchoClient) {
 	}
 }
 
+func callUnaryEchoWithErrorQuota(client pb.EchoClient) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r, err := client.UnaryEcho(ctx, &pb.EchoRequest{Message: "hello"})
+	if err != nil {
+		s := status.Convert(err)
+		for _, d := range s.Details() {
+			switch info := d.(type) {
+			case *errPb.QuotaFailure:
+				log.Printf("QuotaInfo: %s", info)
+			default:
+				log.Printf("Unexpected type: %s", info)
+			}
+		}
+		os.Exit(1)
+	}
+	log.Printf("Echo from server: %s", r.Message)
+}
+
 // Authentication - fake simulation
 func fetchToken() *oauth2.Token {
 	return &oauth2.Token{
@@ -128,5 +150,7 @@ func main() {
 	// callUnaryEcho(ecClient, "hello world")
 
 	// callUnaryWithGzip(ecClient)
+
+	// callUnaryEchoWithErrorQuota(ecClient)
 
 }
