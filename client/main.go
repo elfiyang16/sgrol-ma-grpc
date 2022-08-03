@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/oauth"
+	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/status"
 	// pb "github.com/elfiyang16/sgrol-ma/proto/echo"
 )
@@ -60,6 +61,18 @@ func streamWithCancel(client pb.EchoClient) {
 	// recvMessage(stream, codes.OK)
 
 	recvMessage(stream, codes.Canceled)
+}
+
+func callUnaryWithGzip(client pb.EchoClient) {
+	const msg = "compress"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := client.UnaryEcho(ctx, &pb.EchoRequest{Message: msg}, grpc.UseCompressor(gzip.Name))
+	fmt.Printf("UnaryEcho: %v, %v\n", res.GetMessage(), err)
+	if err != nil || res.GetMessage() != msg {
+		log.Fatalf("Message=%q, err=%v; want Message=%q, err=<nil>", res.GetMessage(), err, msg)
+	}
 }
 
 // Authentication - fake simulation
@@ -113,5 +126,7 @@ func main() {
 	// streamWithCancel(ecClient)
 
 	// callUnaryEcho(ecClient, "hello world")
+
+	// callUnaryWithGzip(ecClient)
 
 }
