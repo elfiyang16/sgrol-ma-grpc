@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -30,6 +31,8 @@ import (
 
 var addr = flag.String("addr", "localhost:50051", "http service address")
 
+const fallbackToken = "some-secret-token"
+
 // valid json
 var servinceConfig = `{
 	"loadBalancingPolicy": "round_robin",
@@ -37,6 +40,70 @@ var servinceConfig = `{
 		"serviceName": ""
 	}
 }`
+
+func logger(format string, a ...interface{}) {
+	fmt.Printf("LOG:\t"+format+"\n", a...)
+}
+
+func unaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	var credsConfigured bool
+	for _, o := range opts {
+		_, ok := o.(grpc.PerRPCCredsCallOption)
+		if ok {
+			credsConfigured = true
+			break
+		}
+	}
+
+	if !credsConfigured {
+		opts = append(opts, grpc.PerRPCCredentials(oauth.NewOauthAccess(&oauth2.Token{AccessToken: fallbackToken})))
+	}
+	start := time.Now()
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	end := time.Now()
+	logger("RPC: %s, start time: %s, end time: %s, err: %v", method, start.Format("Basic"), end.Format(time.RFC3339), err)
+	return err
+}
+
+type wrappedStream struct {
+	grpc.ClientStream
+}
+
+func (w *wrappedStream) SendMsg(m interface{}) error {
+	logger("Send a message (Type: %T) at %v", m, time.Now().Format(time.RFC3339))
+	return w.ClientStream.SendMsg(m)
+}
+
+func (w *wrappedStream) RecvMsg(m interface{}) error {
+	logger("Send a message (Type: %T) at %v", m, time.Now().Format(time.RFC3339))
+	return w.ClientStream.RecvMsg(m)
+}
+
+func newWrappedStream(stream grpc.ClientStream) *wrappedStream {
+	return &wrappedStream{stream}
+}
+
+// Streamer is called by StreamClientInterceptor to create a ClientStream.
+func streamInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	var credsConfigured bool
+	for _, o := range opts {
+		_, ok := o.(*grpc.PerRPCCredsCallOption)
+		if ok {
+			credsConfigured = true
+			break
+		}
+	}
+	if !credsConfigured {
+		opts = append(opts, grpc.PerRPCCredentials(oauth.NewOauthAccess(&oauth2.Token{
+			AccessToken: fallbackToken,
+		})))
+	}
+	clientStream, err := streamer(ctx, desc, cc, method, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return newWrappedStream(clientStream), nil
+}
 
 func callUnaryEcho(client pb.EchoClient, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -46,6 +113,35 @@ func callUnaryEcho(client pb.EchoClient, message string) {
 		log.Fatalf("client.UnaryEcho(_) = _, %v: ", err)
 	}
 	fmt.Println("UnaryEcho: ", resp.Message)
+}
+
+func callBidiStreamingEcho(client pb.EchoClient) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := client.BidirectionalStreamingEcho(ctx)
+	if err != nil {
+		return
+	}
+	for i := 0; i < 5; i++ {
+		if err := c.Send(&pb.EchoRequest{Message: "hello"}); err != nil {
+			log.Fatalf("failed to send message: %v", err)
+		}
+	}
+	err = c.CloseSend() // close the stream on the sender side
+	if err != nil {
+		log.Fatalf("failed to close send: %v", err)
+	}
+
+	for {
+		resp, err := c.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("failed to receive message: %v", err)
+		}
+		fmt.Println("BidiStreamingEcho: ", resp.Message)
+	}
 }
 
 func streamWithCancel(client pb.EchoClient) {
@@ -166,6 +262,8 @@ func main() {
 		grpc.WithBlock(),
 		grpc.WithResolvers(r), // block until underlying connection is up
 		grpc.WithDefaultServiceConfig(servinceConfig),
+		grpc.WithUnaryInterceptor(unaryInterceptor),
+		grpc.WithStreamInterceptor(streamInterceptor),
 	}
 
 	// conn, err := grpc.Dial(*addr, opts...)
@@ -176,8 +274,10 @@ func main() {
 	defer conn.Close()
 
 	ecClient := pb.NewEchoClient(conn)
+	callUnaryEcho(ecClient, "hello world")
+	callBidiStreamingEcho(ecClient)
 
-	callUnaryWithHealthConfig(ecClient)
+	// callUnaryWithHealthConfig(ecClient)
 
 	// streamWithCancel(ecClient)
 

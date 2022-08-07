@@ -135,6 +135,64 @@ func runHealthSvr(server *grpc.Server) {
 	}()
 }
 
+// logger is to mock a sophisticated logging system. To simplify the example, we just print out the content.
+func logger(format string, a ...interface{}) {
+	fmt.Printf("LOG:\t"+format+"\n", a...)
+}
+
+func unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, errMissingMetadata
+	}
+	if !valid(md["authorization"]) {
+		return nil, errInvalidToken
+	}
+	m, err := handler(ctx, req)
+	if err != nil {
+		logger("error: %v", err)
+	}
+	return m, err
+}
+
+// wrappedStream wraps around the embedded grpc.ServerStream, and intercepts the RecvMsg and
+// SendMsg method call.
+type wrappedStream struct {
+	grpc.ServerStream
+}
+
+// HOC, or Decorator
+func (w *wrappedStream) RecvMsg(m interface{}) error {
+	logger("Received message: %v", m)
+	return w.ServerStream.RecvMsg(m)
+}
+
+func (w *wrappedStream) SendMsg(m interface{}) error {
+	logger("Sending message: %v", m)
+	return w.ServerStream.SendMsg(m)
+}
+
+func newWrappedStream(s grpc.ServerStream) grpc.ServerStream {
+	return &wrappedStream{s}
+}
+
+func streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	md, ok := metadata.FromIncomingContext(ss.Context())
+	if !ok {
+		return errMissingMetadata
+	}
+	if !valid(md["authorization"]) {
+		return errInvalidToken
+	}
+	// Intercept on the stream Handler directly
+	err := handler(srv, newWrappedStream(ss))
+
+	if err != nil {
+		logger("error: %v", err)
+	}
+	return err
+}
+
 func main() {
 	flag.Parse()
 	fmt.Printf("server starting on port %d...\n", *port)
@@ -144,17 +202,19 @@ func main() {
 		log.Fatalf("failed to load key pair: %s", err)
 	}
 	opts := []grpc.ServerOption{
-		grpc.UnaryInterceptor(ensureValidToken),
+		// grpc.UnaryInterceptor(ensureValidToken),
 		// Enable TLS for all incoming connections.
 		grpc.Creds(credentials.NewServerTLSFromCert(&cert)),
+		grpc.UnaryInterceptor(unaryInterceptor),
+		grpc.StreamInterceptor(streamInterceptor),
 	}
+	// UnaryHandler defines the handler invoked by UnaryServerInterceptor to complete the normal execution of a unary RPC.
 	s := grpc.NewServer(opts...)
-
 	// Register EchoService service.
 	// pb.RegisterEchoServer(s, &ecServer{})
 	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
 
-	runHealthSvr(s)
+	// runHealthSvr(s)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
