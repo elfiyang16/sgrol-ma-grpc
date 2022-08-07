@@ -113,28 +113,10 @@ func ensureValidToken(ctx context.Context, req interface{}, info *grpc.UnaryServ
 	return handler(ctx, req)
 }
 
-func main() {
-	flag.Parse()
-	fmt.Printf("server starting on port %d...\n", *port)
-
-	cert, err := tls.LoadX509KeyPair(data.Path("x509/server_cert.pem"), data.Path("x509/server_key.pem"))
-	if err != nil {
-		log.Fatalf("failed to load key pair: %s", err)
-	}
-	opts := []grpc.ServerOption{
-		grpc.UnaryInterceptor(ensureValidToken),
-		// Enable TLS for all incoming connections.
-		grpc.Creds(credentials.NewServerTLSFromCert(&cert)),
-	}
-	s := grpc.NewServer(opts...)
-
+func runHealthSvr(server *grpc.Server) {
 	// Register health server
 	healthcheck := health.NewServer() // include statusMap and updates (map[string]map[healthgrpc.Health_WatchServer]chan healthpb.HealthCheckResponse_ServingStatus))
-	healthgrpc.RegisterHealthServer(s, healthcheck)
-
-	// Register EchoService service.
-	// pb.RegisterEchoServer(s, &ecServer{})
-	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
+	healthgrpc.RegisterHealthServer(server, healthcheck)
 
 	// start healthserver in a subroutine
 	go func() {
@@ -151,6 +133,28 @@ func main() {
 			time.Sleep(*sleep)
 		}
 	}()
+}
+
+func main() {
+	flag.Parse()
+	fmt.Printf("server starting on port %d...\n", *port)
+
+	cert, err := tls.LoadX509KeyPair(data.Path("x509/server_cert.pem"), data.Path("x509/server_key.pem"))
+	if err != nil {
+		log.Fatalf("failed to load key pair: %s", err)
+	}
+	opts := []grpc.ServerOption{
+		grpc.UnaryInterceptor(ensureValidToken),
+		// Enable TLS for all incoming connections.
+		grpc.Creds(credentials.NewServerTLSFromCert(&cert)),
+	}
+	s := grpc.NewServer(opts...)
+
+	// Register EchoService service.
+	// pb.RegisterEchoServer(s, &ecServer{})
+	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
+
+	runHealthSvr(s)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

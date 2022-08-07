@@ -109,6 +109,13 @@ func callUnaryEchoWithErrorQuota(client pb.EchoClient) {
 	log.Printf("Echo from server: %s", r.Message)
 }
 
+func callUnaryWithHealthConfig(client pb.EchoClient) {
+	for {
+		callUnaryEcho(client, "hello")
+		time.Sleep(time.Second)
+	}
+}
+
 // Authentication - fake simulation
 func fetchToken() *oauth2.Token {
 	return &oauth2.Token{
@@ -170,10 +177,7 @@ func main() {
 
 	ecClient := pb.NewEchoClient(conn)
 
-	for {
-		callUnaryEcho(ecClient, "hello")
-		time.Sleep(time.Second)
-	}
+	callUnaryWithHealthConfig(ecClient)
 
 	// streamWithCancel(ecClient)
 
