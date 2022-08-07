@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
 	"google.golang.org/grpc/status"
@@ -40,6 +41,12 @@ var servinceConfig = `{
 		"serviceName": ""
 	}
 }`
+
+var kacp = keepalive.ClientParameters{
+	Time:                10 * time.Second,
+	Timeout:             20 * time.Second,
+	PermitWithoutStream: true,
+}
 
 func logger(format string, a ...interface{}) {
 	fmt.Printf("LOG:\t"+format+"\n", a...)
