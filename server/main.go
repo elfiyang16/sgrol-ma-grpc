@@ -10,12 +10,16 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/elfiyang16/sgrol-ma/data"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip" // Enable gzip on the server side
+	"google.golang.org/grpc/health"
+	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -23,13 +27,20 @@ import (
 	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
+const REAPEAT_COUNT = 1000
+
 var (
 	// grpc's own error code
 	errMissingMetadata = status.Errorf(codes.InvalidArgument, "missing metadata")
 	errInvalidToken    = status.Errorf(codes.Unauthenticated, "invalid token")
 )
 
-var port = flag.Int("port", 50051, "the port to serve on")
+var (
+	port  = flag.Int("port", 50051, "the port to serve on")
+	sleep = flag.Duration("sleep", 0, "duration between changes in health")
+
+	system = "" // empty system means all systems
+)
 
 type ecServer struct {
 	pb.UnimplementedEchoServer
@@ -42,7 +53,7 @@ func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.Echo
 	defer s.mu.Unlock()
 	s.count[req.Message]++
 	// track the number of time a message is repeated
-	if s.count[req.Message] > 2 {
+	if s.count[req.Message] > REAPEAT_COUNT {
 		st := status.New(codes.ResourceExhausted, "message is repeated")
 		// append details to the status
 		ds, err := st.WithDetails(
@@ -117,9 +128,29 @@ func main() {
 	}
 	s := grpc.NewServer(opts...)
 
+	// Register health server
+	healthcheck := health.NewServer() // include statusMap and updates (map[string]map[healthgrpc.Health_WatchServer]chan healthpb.HealthCheckResponse_ServingStatus))
+	healthgrpc.RegisterHealthServer(s, healthcheck)
+
 	// Register EchoService service.
 	// pb.RegisterEchoServer(s, &ecServer{})
 	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
+
+	// start healthserver in a subroutine
+	go func() {
+		next := healthpb.HealthCheckResponse_SERVING
+		// Here manually set the health status of the server.
+		for {
+			healthcheck.SetServingStatus(system, next)
+			// Simulate the changes in server health, take turns from unhealthy to healthy
+			if next == healthpb.HealthCheckResponse_SERVING {
+				next = healthpb.HealthCheckResponse_NOT_SERVING
+			} else {
+				next = healthpb.HealthCheckResponse_SERVING
+			}
+			time.Sleep(*sleep)
+		}
+	}()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {

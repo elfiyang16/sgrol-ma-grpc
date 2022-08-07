@@ -18,13 +18,25 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/resolver"
+	"google.golang.org/grpc/resolver/manual"
 	"google.golang.org/grpc/status"
 
 	// pb "github.com/elfiyang16/sgrol-ma/proto/echo"
 	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
+	// import grpc/health to enable transparent client side checking
+	_ "google.golang.org/grpc/health"
 )
 
 var addr = flag.String("addr", "localhost:50051", "http service address")
+
+// valid json
+var servinceConfig = `{
+	"loadBalancingPolicy": "round_robin",
+	"healthCheckConfig": {
+		"serviceName": ""
+	}
+}`
 
 func callUnaryEcho(client pb.EchoClient, message string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -124,6 +136,15 @@ func recvMessage(stream pb.Echo_BidirectionalStreamingEchoClient, wantErrCode co
 func main() {
 	flag.Parse()
 
+	r := manual.NewBuilderWithScheme("whatever")
+	r.InitialState(resolver.State{
+		Addresses: []resolver.Address{
+			{Addr: "localhost:50051"},
+			{Addr: "localhost:50052"},
+		},
+	})
+	address := fmt.Sprintf("%s:///unused", r.Scheme())
+
 	perRPC := oauth.NewOauthAccess(fetchToken())
 	creds, err := credentials.NewClientTLSFromFile(data.Path("x509/ca_cert.pem"), "x.test.example.com")
 	if err != nil {
@@ -132,18 +153,27 @@ func main() {
 
 	opts := []grpc.DialOption{
 		grpc.WithPerRPCCredentials(perRPC),
+		// Bypass the TLS check, but this is not a good idea :)
+		// grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithTransportCredentials(creds),
+		grpc.WithBlock(),
+		grpc.WithResolvers(r), // block until underlying connection is up
+		grpc.WithDefaultServiceConfig(servinceConfig),
 	}
 
-	conn, err := grpc.Dial(*addr, opts...)
-	// Bypass the TLS check, but this is not a good idea :)
-	// conn, err := grpc.Dial(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// conn, err := grpc.Dial(*addr, opts...)
+	conn, err := grpc.Dial(address, opts...)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
 	defer conn.Close()
 
 	ecClient := pb.NewEchoClient(conn)
+
+	for {
+		callUnaryEcho(ecClient, "hello")
+		time.Sleep(time.Second)
+	}
 
 	// streamWithCancel(ecClient)
 
