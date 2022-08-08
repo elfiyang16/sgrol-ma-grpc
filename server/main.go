@@ -28,7 +28,11 @@ import (
 	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
-const REAPEAT_COUNT = 1000
+const (
+	REAPEAT_COUNT   = 1000
+	timestampFormat = time.StampNano
+	streamingCount  = 10
+)
 
 var (
 	// grpc's own error code
@@ -68,6 +72,33 @@ type ecServer struct {
 func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Create trailer in defer to record function return time.
+	defer func() {
+		trailer := metadata.Pairs(
+			"timestamp", time.Now().Format(timestampFormat),
+		)
+		grpc.SetTrailer(ctx, trailer)
+	}()
+	// read the metadata from the incoming context
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Errorf(codes.DataLoss, "failed to get metadata")
+	}
+	if t, ok := md["timestamp"]; ok {
+		fmt.Printf("timestamp from metadata:\n")
+		for i, e := range t { // md value is []string
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	}
+	// create and send header
+	header := metadata.New(map[string]string{
+		"location":  "MTV",
+		"timestamp": time.Now().Format(timestampFormat),
+	})
+	if err := grpc.SendHeader(ctx, header); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to send header: %v", err)
+	}
+
 	s.count[req.Message]++
 	// track the number of time a message is repeated
 	if s.count[req.Message] > REAPEAT_COUNT {
@@ -89,14 +120,113 @@ func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.Echo
 	return &pb.EchoResponse{Message: req.Message}, nil
 }
 
+// Echo_ServerStreamingEchoServer can only send
+func (s *ecServer) ServerStreamingEcho(in *pb.EchoRequest, stream pb.Echo_ServerStreamingEchoServer) error {
+	fmt.Printf("--- ServerStreamingEcho ---\n")
+	defer func() {
+		trailer := metadata.Pairs(
+			"timestamp", time.Now().Format(timestampFormat),
+		)
+		stream.SetTrailer(trailer)
+	}()
+
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if !ok {
+		return status.Errorf(codes.DataLoss, "ServerStreamingEcho: failed to get metadata")
+	}
+	if t, ok := md["timestamp"]; ok {
+		fmt.Printf("timestamp from metadata:\n")
+		for i, e := range t {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	}
+	// Create and send header.
+	header := metadata.New(map[string]string{"location": "MTV", "timestamp": time.Now().Format(timestampFormat)})
+	stream.SendHeader(header)
+
+	fmt.Printf("request received: %v\n", in)
+
+	for i := 0; i < streamingCount; i++ {
+		if err := stream.Send(&pb.EchoResponse{Message: in.Message}); err != nil {
+			return err
+		}
+
+	}
+	return nil // denote finishing the response --> RPC translates to appropriate status code
+}
+
+// Echo_ClientStreamingEchoServer can  sendandclose, recv
+func (s *ecServer) ClientStreamingEcho(stream pb.Echo_ClientStreamingEchoServer) error {
+	fmt.Printf("--- ClientStreamingEcho ---\n")
+	defer func() {
+		trailer := metadata.Pairs(
+			"timestamp", time.Now().Format(timestampFormat),
+		)
+		stream.SetTrailer(trailer)
+	}()
+
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if !ok {
+		return status.Errorf(codes.DataLoss, "ClientStreamingEcho: failed to get metadata")
+	}
+	if t, ok := md["timestamp"]; ok {
+		fmt.Printf("timestamp from metadata:\n")
+		for i, e := range t {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	}
+	// Create and send header.
+	header := metadata.New(map[string]string{"location": "MTV", "timestamp": time.Now().Format(timestampFormat)})
+	if err := stream.SendHeader(header); err != nil {
+		return err
+	}
+
+	var message string
+	for {
+		in, err := stream.Recv()
+		if err == io.EOF {
+			fmt.Printf("echo last received message\n")
+			// receive the last msg from client and send the response
+			return stream.SendAndClose(&pb.EchoResponse{Message: message})
+		}
+		message = in.Message
+		fmt.Printf("request received: %v, building echo\n", in)
+		if err != nil {
+			return err
+		}
+	}
+}
+
 // Where this stream coming from?
 // Server set up methods, and client calls on stub
 func (s *ecServer) BidirectionalStreamingEcho(stream pb.Echo_BidirectionalStreamingEchoServer) error {
+	fmt.Printf("--- BidirectionalStreamingEcho ---\n")
+	defer func() {
+		trailer := metadata.Pairs("timestamp", time.Now().Format(timestampFormat))
+		stream.SetTrailer(trailer)
+	}()
+	// Read metadata from client.
+	md, ok := metadata.FromIncomingContext(stream.Context())
+	if !ok {
+		return status.Errorf(codes.DataLoss, "BidirectionalStreamingEcho: failed to get metadata")
+	}
+	if t, ok := md["timestamp"]; ok {
+		fmt.Printf("timestamp from metadata:\n")
+		for i, e := range t {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	}
+
+	// Create and send header.
+	header := metadata.New(map[string]string{"location": "MTV", "timestamp": time.Now().Format(timestampFormat)})
+	stream.SendHeader(header)
+
 	for {
 		in, err := stream.Recv() // Why it's a pointer to the request thought?
 		if err != nil {
 			fmt.Printf("server: error receiving from stream: %v\n", err)
-			if err == io.EOF { // the stream is closed by the client
+			// the stream is closed by the client, so server also closes
+			if err == io.EOF {
 				return nil
 			}
 			return err
@@ -247,17 +377,6 @@ func main() {
 	pb.RegisterEchoServer(s, &ecServer{
 		count: make(map[string]int),
 	})
-
-	// runHealthSvr(s)
-
-	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
-	// if err != nil {
-	// 	log.Fatalf("failed to listen: %v", err)
-	// }
-
-	// if err := s.Serve(lis); err != nil {
-	// 	log.Fatalf("failed to serve: %v", err)
-	// }
 
 	var wg sync.WaitGroup
 	for _, addr := range addrs {

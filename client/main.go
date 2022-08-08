@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
 	"google.golang.org/grpc/status"
@@ -32,7 +33,11 @@ import (
 
 var addr = flag.String("addr", "localhost:50051", "http service address")
 
-const fallbackToken = "some-secret-token"
+const (
+	fallbackToken   = "some-secret-token"
+	timestampFormat = time.StampNano // "Jan _2 15:04:05.000"
+	streamingCount  = 10
+)
 
 // valid json
 var servinceConfig = `{
@@ -112,43 +117,186 @@ func streamInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.Clie
 	return newWrappedStream(clientStream), nil
 }
 
+func checkHeader(header metadata.MD) {
+	if t, ok := header["timestamp"]; ok {
+		fmt.Printf("timestamp from header:\n")
+		for i, e := range t {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	} else {
+		log.Fatal("timestamp expected but doesn't exist in header")
+	}
+	if l, ok := header["location"]; ok {
+		fmt.Printf("location from header:\n")
+		for i, e := range l {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	} else {
+		log.Fatal("location expected but doesn't exist in header")
+	}
+
+}
+
+func checkTrailer(trailer metadata.MD) {
+	if t, ok := trailer["timestamp"]; ok {
+		fmt.Printf("timestamp from trailer:\n")
+		for i, e := range t {
+			fmt.Printf(" %d. %s\n", i, e)
+		}
+	} else {
+		log.Fatal("timestamp expected but doesn't exist in trailer")
+	}
+}
+
 func callUnaryEcho(client pb.EchoClient, message string) {
+	fmt.Printf("--- unary ---\n")
+	md := metadata.Pairs("timestamp", time.Now().Format(timestampFormat))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx = metadata.NewOutgoingContext(ctx, md)
 	defer cancel()
-	resp, err := client.UnaryEcho(ctx, &pb.EchoRequest{Message: message})
+
+	var header, trailer metadata.MD
+
+	resp, err := client.UnaryEcho(
+		ctx,
+		&pb.EchoRequest{Message: message},
+		grpc.Header(&header), // Similar to json
+		grpc.Trailer(&trailer),
+	)
 	if err != nil {
 		log.Fatalf("client.UnaryEcho(_) = _, %v: ", err)
 	}
-	fmt.Println("UnaryEcho: ", resp.Message)
+
+	checkHeader(header)
+	checkTrailer(trailer)
+	fmt.Println("UnaryEcho Res: ", resp.Message)
 }
 
-func callBidiStreamingEcho(client pb.EchoClient) {
+func callServerStreamingEcho(client pb.EchoClient, message string) {
+	fmt.Printf("--- server streaming ---\n")
+	md := metadata.Pairs("timestamp", time.Now().Format(timestampFormat))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx = metadata.NewOutgoingContext(ctx, md)
 	defer cancel()
-	c, err := client.BidirectionalStreamingEcho(ctx)
+
+	stream, err := client.ServerStreamingEcho(
+		ctx,
+		&pb.EchoRequest{Message: message},
+	)
+	if err != nil {
+		log.Fatalf("failed to call ServerStreamingEcho: %v", err)
+	}
+	// check header before receive
+	header, err := stream.Header()
+	if err != nil {
+		log.Fatalf("failed to get header from stream: %v", err)
+	}
+	checkHeader(header)
+
+	// receive messages from server
+	var rpcStatus error
+	for {
+		res, err := stream.Recv()
+		if err != nil {
+			rpcStatus = err
+			break // break on first err
+		}
+		fmt.Println("ServerStreamingEcho Res: ", res.Message)
+	}
+	if rpcStatus != io.EOF { // server side: return nil
+		log.Fatalf("failed to finish server streaming: %v", rpcStatus)
+	}
+
+	// check trailer after receive
+	trailer := stream.Trailer()
+	checkTrailer(trailer)
+}
+
+func callClientStreamingEcho(client pb.EchoClient, message string) {
+	fmt.Printf("--- client streaming ---\n")
+	md := metadata.Pairs("timestamp", time.Now().Format(timestampFormat))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx = metadata.NewOutgoingContext(ctx, md)
+	defer cancel()
+
+	stream, err := client.ClientStreamingEcho(ctx)
+	if err != nil {
+		log.Fatalf("failed to call ClientStreamingEcho: %v", err)
+	}
+
+	// check header before send
+	header, err := stream.Header()
+	if err != nil {
+		log.Fatalf("failed to get header from stream: %v", err)
+	}
+	checkHeader(header)
+
+	// send stream
+	for i := 0; i < streamingCount; i++ {
+		if err := stream.Send(&pb.EchoRequest{Message: message}); err != nil {
+			log.Fatalf("failed to send message streaming client: %v", err)
+		}
+	}
+
+	res, err := stream.CloseAndRecv() // server side: SendAndClose
+	if err != nil {
+		log.Fatalf("failed to CloseAndRecv: %v\n", err)
+	}
+	fmt.Printf("response:\n")
+	fmt.Printf(" - %s\n\n", res.Message)
+
+	// check trailer after send
+	trailer := stream.Trailer()
+	checkTrailer(trailer)
+}
+
+func callBidiStreamingEcho(client pb.EchoClient, message string) {
+	fmt.Printf("--- bidirectional ---\n")
+
+	md := metadata.Pairs("timestamp", time.Now().Format(timestampFormat))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx = metadata.NewOutgoingContext(ctx, md)
+	defer cancel()
+
+	stream, err := client.BidirectionalStreamingEcho(ctx)
 	if err != nil {
 		return
 	}
-	for i := 0; i < 5; i++ {
-		if err := c.Send(&pb.EchoRequest{Message: "hello"}); err != nil {
-			log.Fatalf("failed to send message: %v", err)
-		}
-	}
-	err = c.CloseSend() // close the stream on the sender side
-	if err != nil {
-		log.Fatalf("failed to close send: %v", err)
-	}
 
-	for {
-		resp, err := c.Recv()
-		if err == io.EOF {
-			break
-		}
+	// send on a GRT
+	go func() {
+		header, err := stream.Header()
 		if err != nil {
-			log.Fatalf("failed to receive message: %v", err)
+			log.Fatalf("failed to get header from stream: %v", err)
+		}
+		checkHeader(header)
+
+		for i := 0; i < 5; i++ {
+			if err := stream.Send(&pb.EchoRequest{Message: message}); err != nil {
+				log.Fatalf("failed to send message: %v", err)
+			}
+		}
+		err = stream.CloseSend() // close the stream on the sender side
+		if err != nil {
+			log.Fatalf("failed to close send: %v", err)
+		}
+	}()
+
+	// receive on current GRT
+	var rpcStatus error
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			rpcStatus = err
+			break
 		}
 		fmt.Println("BidiStreamingEcho: ", resp.Message)
 	}
+	if rpcStatus != io.EOF {
+		log.Fatalf("failed to finish server streaming: %v", rpcStatus)
+	}
+	trailer := stream.Trailer()
+	checkTrailer(trailer)
 }
 
 func streamWithCancel(client pb.EchoClient) {
@@ -333,7 +481,9 @@ func main() {
 
 	ecClient := pb.NewEchoClient(conn)
 	callUnaryEcho(ecClient, "hello world")
-	callBidiStreamingEcho(ecClient)
+	callBidiStreamingEcho(ecClient, "hello world bidirection")
+	callServerStreamingEcho(ecClient, "hello world server")
+	callClientStreamingEcho(ecClient, "hello world client")
 
 	// callUnaryWithHealthConfig(ecClient)
 
