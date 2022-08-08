@@ -243,9 +243,24 @@ func recvMessage(stream pb.Echo_BidirectionalStreamingEchoClient, wantErrCode co
 	fmt.Printf("Received message: %q\n", res.GetMessage())
 }
 
-func main() {
-	flag.Parse()
+func makeRPCs(cc *grpc.ClientConn, n int) {
+	hwc := pb.NewEchoClient(cc)
+	for i := 0; i < n; i++ {
+		callUnaryEcho(hwc, "this is examples/load_balancing")
+	}
+}
 
+func getCustomCreds() (credentials.PerRPCCredentials, credentials.TransportCredentials) {
+	perRPCCreds := oauth.NewOauthAccess(fetchToken())
+	tspCreds, err := credentials.NewClientTLSFromFile(data.Path("x509/ca_cert.pem"), "x.test.example.com")
+	if err != nil {
+		log.Fatalf("failed to load credentials: %v", err)
+	}
+	return perRPCCreds, tspCreds
+}
+
+func dialNormal() *grpc.ClientConn {
+	// Manual resolver configuration
 	r := manual.NewBuilderWithScheme("whatever")
 	r.InitialState(resolver.State{
 		Addresses: []resolver.Address{
@@ -254,30 +269,66 @@ func main() {
 		},
 	})
 	address := fmt.Sprintf("%s:///unused", r.Scheme())
-
-	perRPC := oauth.NewOauthAccess(fetchToken())
-	creds, err := credentials.NewClientTLSFromFile(data.Path("x509/ca_cert.pem"), "x.test.example.com")
-	if err != nil {
-		log.Fatalf("failed to load credentials: %v", err)
-	}
-
+	// cred config
+	perRPCCreds, tspCreds := getCustomCreds()
+	// opts
 	opts := []grpc.DialOption{
-		grpc.WithPerRPCCredentials(perRPC),
+		grpc.WithPerRPCCredentials(perRPCCreds),
 		// Bypass the TLS check, but this is not a good idea :)
 		// grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithTransportCredentials(creds),
+		grpc.WithTransportCredentials(tspCreds),
 		grpc.WithBlock(),
 		grpc.WithResolvers(r), // block until underlying connection is up
 		grpc.WithDefaultServiceConfig(servinceConfig),
 		grpc.WithUnaryInterceptor(unaryInterceptor),
 		grpc.WithStreamInterceptor(streamInterceptor),
 	}
-
 	// conn, err := grpc.Dial(*addr, opts...)
 	conn, err := grpc.Dial(address, opts...)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
+	return conn
+}
+
+func dialPickFirst() *grpc.ClientConn {
+	perRPCCreds, tspCreds := getCustomCreds()
+	// "pick_first" is the default, so there's no need to set the load balancing policy.
+	pickFirstConn, err := grpc.Dial(
+		fmt.Sprintf("%s:///%s", "custom", "lb.custom.grpc.io"),
+		grpc.WithPerRPCCredentials(perRPCCreds),
+		grpc.WithTransportCredentials(tspCreds),
+	)
+	if err != nil {
+		log.Fatalf("did not connect: %v", err)
+	}
+	return pickFirstConn
+}
+
+func dialRoundRobin() *grpc.ClientConn {
+	perRPCCreds, tspCreds := getCustomCreds()
+
+	roundrobinConn, err := grpc.Dial(
+		// fmt.Sprintf("%s:///%s", CustomScheme, CustomServiceName),
+		fmt.Sprintf("%s:///%s", "custom", "lb.custom.grpc.io"),
+		// fmt.Sprintf("%s:///%s", exampleScheme, exampleServiceName),
+
+		grpc.WithPerRPCCredentials(perRPCCreds),
+		grpc.WithTransportCredentials(tspCreds),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingConfig": [{"round_robin":{}}]}`),
+	)
+	if err != nil {
+		log.Fatalf("did not connect: %v", err)
+	}
+	return roundrobinConn
+}
+
+func main() {
+	flag.Parse()
+
+	// conn := dialNormal()
+	conn := dialRoundRobin()
+	// conn := dialPickFirst()
 	defer conn.Close()
 
 	ecClient := pb.NewEchoClient(conn)
@@ -293,5 +344,4 @@ func main() {
 	// callUnaryWithGzip(ecClient)
 
 	// callUnaryEchoWithErrorQuota(ecClient)
-
 }

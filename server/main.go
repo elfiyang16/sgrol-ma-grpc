@@ -37,7 +37,9 @@ var (
 )
 
 var (
-	port  = flag.Int("port", 50051, "the port to serve on")
+	// port  = flag.Int("port", 50051, "the port to serve on")
+	addrs = []string{":50051", ":50052"}
+
 	sleep = flag.Duration("sleep", 0, "duration between changes in health")
 
 	system = "" // empty system means all systems
@@ -60,6 +62,7 @@ type ecServer struct {
 	pb.UnimplementedEchoServer
 	count map[string]int
 	mu    sync.Mutex
+	addr  string
 }
 
 func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
@@ -175,7 +178,7 @@ type wrappedStream struct {
 	grpc.ServerStream
 }
 
-// HOC, or Decorator
+// HOC, or Decorator on the ServerStream interface
 func (w *wrappedStream) RecvMsg(m interface{}) error {
 	logger("Received message: %v", m)
 	return w.ServerStream.RecvMsg(m)
@@ -198,7 +201,7 @@ func streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamS
 	if !valid(md["authorization"]) {
 		return errInvalidToken
 	}
-	// Intercept on the stream Handler directly
+	// Interceptor has to call the handler itself
 	err := handler(srv, newWrappedStream(ss))
 
 	if err != nil {
@@ -207,14 +210,30 @@ func streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamS
 	return err
 }
 
+func startServer(addr string, opts []grpc.ServerOption) {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	s := grpc.NewServer(opts...)
+	pb.RegisterEchoServer(s, &ecServer{
+		addr:  addr,
+		count: make(map[string]int),
+	})
+	runHealthSvr(s)
+	log.Println("Server started at " + addr)
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
+}
+
 func main() {
 	flag.Parse()
-	fmt.Printf("server starting on port %d...\n", *port)
-
 	cert, err := tls.LoadX509KeyPair(data.Path("x509/server_cert.pem"), data.Path("x509/server_key.pem"))
 	if err != nil {
 		log.Fatalf("failed to load key pair: %s", err)
 	}
+
 	opts := []grpc.ServerOption{
 		// grpc.UnaryInterceptor(ensureValidToken),
 		// Enable TLS for all incoming connections.
@@ -224,20 +243,30 @@ func main() {
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
 	}
-	// UnaryHandler defines the handler invoked by UnaryServerInterceptor to complete the normal execution of a unary RPC.
 	s := grpc.NewServer(opts...)
-	// Register EchoService service.
-	// pb.RegisterEchoServer(s, &ecServer{})
-	pb.RegisterEchoServer(s, &ecServer{count: make(map[string]int)})
+	pb.RegisterEchoServer(s, &ecServer{
+		count: make(map[string]int),
+	})
 
 	// runHealthSvr(s)
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
+	// lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	// if err != nil {
+	// 	log.Fatalf("failed to listen: %v", err)
+	// }
 
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+	// if err := s.Serve(lis); err != nil {
+	// 	log.Fatalf("failed to serve: %v", err)
+	// }
+
+	var wg sync.WaitGroup
+	for _, addr := range addrs {
+		wg.Add(1)
+		// start the server in a goroutine
+		go func(addr string, opts []grpc.ServerOption) {
+			defer wg.Done()
+			startServer(addr, opts)
+		}(addr, opts)
 	}
+	wg.Wait()
 }
