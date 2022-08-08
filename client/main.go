@@ -12,6 +12,8 @@ import (
 	// Interesting, move in & out, and have to have this weird aming for protoc to work
 	data "github.com/elfiyang16/sgrol-ma/data"
 	pb "github.com/elfiyang16/sgrol-ma/proto/github.com/elfiyang16/sgrol-ma/proto/echo"
+	hwpb "github.com/elfiyang16/sgrol-ma/proto/github.com/elfiyang16/sgrol-ma/proto/hello"
+
 	"golang.org/x/oauth2"
 
 	"google.golang.org/grpc"
@@ -484,6 +486,11 @@ func main() {
 	callBidiStreamingEcho(ecClient, "hello world bidirection")
 	callServerStreamingEcho(ecClient, "hello world server")
 	callClientStreamingEcho(ecClient, "hello world client")
+
+	fmt.Println("--- calling helloworld.Greeter/SayHello ---")
+	// Make a greeter client and send an RPC.
+	hwc := hwpb.NewGreeterClient(conn)
+	callSayHello(hwc, "multiplex")
 
 	// callUnaryWithHealthConfig(ecClient)
 

@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/elfiyang16/sgrol-ma/proto/github.com/elfiyang16/sgrol-ma/proto/echo"
+	hwpb "github.com/elfiyang16/sgrol-ma/proto/github.com/elfiyang16/sgrol-ma/proto/hello"
 	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
@@ -350,6 +351,7 @@ func startServer(addr string, opts []grpc.ServerOption) {
 		addr:  addr,
 		count: make(map[string]int),
 	})
+	hwpb.RegisterGreeterServer(s, &hwServer{})
 	runHealthSvr(s)
 	log.Println("Server started at " + addr)
 	if err := s.Serve(lis); err != nil {
@@ -373,10 +375,12 @@ func main() {
 		grpc.KeepaliveEnforcementPolicy(kaep),
 		grpc.KeepaliveParams(kasp),
 	}
-	s := grpc.NewServer(opts...)
-	pb.RegisterEchoServer(s, &ecServer{
-		count: make(map[string]int),
-	})
+	// s := grpc.NewServer(opts...)
+	// pb.RegisterEchoServer(s, &ecServer{
+	// 	count: make(map[string]int),
+	// })
+	// register another service
+	// hwpb.RegisterGreeterServer(s, &hwServer{})
 
 	var wg sync.WaitGroup
 	for _, addr := range addrs {
