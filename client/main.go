@@ -35,6 +35,7 @@ func callUnaryEcho(client pb.EchoClient, message string) {
 		&pb.EchoRequest{Message: message},
 		grpc.Header(&header), // Similar to json
 		grpc.Trailer(&trailer),
+		grpc.WaitForReady(true), // default is false
 	)
 	if err != nil {
 		log.Fatalf("client.UnaryEcho(_) = _, %v: ", err)
