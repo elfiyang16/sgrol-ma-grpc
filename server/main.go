@@ -242,6 +242,7 @@ func startServer(addr string, opts []grpc.ServerOption) {
 	})
 	hwpb.RegisterGreeterServer(s, &hwServer{})
 	runHealthSvr(s)
+	runRelectionSvr(s)
 	runChannelzSvr()
 	log.Println("Server started at " + addr)
 	if err := s.Serve(lis); err != nil {
