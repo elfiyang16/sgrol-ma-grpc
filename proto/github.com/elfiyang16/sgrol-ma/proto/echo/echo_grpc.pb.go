@@ -126,12 +126,6 @@ type Echo_BidirectionalStreamingEchoClient interface {
 	grpc.ClientStream
 }
 
-// type Echo_BidirectionalStreamingEchoServer interface {
-// 	Send(*EchoResponse) error
-// 	Recv() (*EchoRequest, error)
-// 	grpc.ServerStream
-// }
-
 type echoBidirectionalStreamingEchoClient struct {
 	grpc.ClientStream
 }

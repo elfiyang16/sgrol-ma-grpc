@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +16,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	_ "google.golang.org/grpc/encoding/gzip" // Enable gzip on the server side
-	"google.golang.org/grpc/health"
-	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -29,45 +24,14 @@ import (
 	errPb "google.golang.org/genproto/googleapis/rpc/errdetails"
 )
 
-const (
-	REAPEAT_COUNT   = 1000
-	timestampFormat = time.StampNano
-	streamingCount  = 10
-)
-
-var (
-	// grpc's own error code
-	errMissingMetadata = status.Errorf(codes.InvalidArgument, "missing metadata")
-	errInvalidToken    = status.Errorf(codes.Unauthenticated, "invalid token")
-)
-
-var (
-	// port  = flag.Int("port", 50051, "the port to serve on")
-	addrs = []string{":50051", ":50052"}
-
-	sleep = flag.Duration("sleep", 0, "duration between changes in health")
-
-	system = "" // empty system means all systems
-)
-
-var kaep = keepalive.EnforcementPolicy{
-	MinTime:             5 * time.Second, // If a client pings more than once every 5 seconds, terminate the connection
-	PermitWithoutStream: true,            // allow pings even when there are no active streams
-}
-
-var kasp = keepalive.ServerParameters{
-	MaxConnectionIdle:     30 * time.Second, //  default value is infinity.
-	MaxConnectionAge:      30 * time.Second, // default value is infinity.
-	MaxConnectionAgeGrace: 5 * time.Second,  // default value is infinity.
-	Time:                  10 * time.Second, // time to wait to ping client, default to 2 hours
-	Timeout:               1 * time.Second,  // time to wait for ping ack before close conn, default to 20 second
-}
-
 type ecServer struct {
 	pb.UnimplementedEchoServer
 	count map[string]int
 	mu    sync.Mutex
 	addr  string
+
+	reqCounter uint
+	reqModulo  uint
 }
 
 func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.EchoResponse, error) {
@@ -118,6 +82,14 @@ func (s *ecServer) UnaryEcho(ctx context.Context, req *pb.EchoRequest) (*pb.Echo
 		}
 		return nil, ds.Err()
 	}
+	log.Printf("UnaryEcho server: %s", req.Message)
+
+	// if err := s.maybeFailRequest(); err != nil {
+	// 	log.Println("request failed count:", s.reqCounter)
+	// 	return nil, err
+	// }
+
+	log.Println("request succeeded count:", s.reqCounter)
 	return &pb.EchoResponse{Message: req.Message}, nil
 }
 
@@ -240,105 +212,17 @@ func (s *ecServer) BidirectionalStreamingEcho(stream pb.Echo_BidirectionalStream
 	}
 }
 
-func valid(authorization []string) bool {
-	if len(authorization) < 1 {
-		return false
+// this method will fail reqModulo - 1 times RPCs and return status code Unavailable,
+// and succeeded RPC on reqModulo times.
+func (s *ecServer) maybeFailRequest() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reqCounter++ // avoid race con on the atomic counter
+	if (s.reqModulo > 0) && (s.reqCounter%s.reqModulo == 0) {
+		return nil
 	}
-	token := strings.TrimPrefix(authorization[0], "Bearer ")
-	return token == "some-secret-token-xxx" // ignore validation and just pretend to check against a string
-}
-
-func ensureValidToken(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	meta, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, errMissingMetadata
-	}
-	// Check the client's token to verify it's validity.
-	if !valid(meta["authorization"]) {
-		return nil, errInvalidToken
-	}
-	// If valid, let the request through.
-	return handler(ctx, req)
-}
-
-func runHealthSvr(server *grpc.Server) {
-	// Register health server
-	healthcheck := health.NewServer() // include statusMap and updates (map[string]map[healthgrpc.Health_WatchServer]chan healthpb.HealthCheckResponse_ServingStatus))
-	healthgrpc.RegisterHealthServer(server, healthcheck)
-
-	// start healthserver in a subroutine
-	go func() {
-		next := healthpb.HealthCheckResponse_SERVING
-		// Here manually set the health status of the server.
-		for {
-			healthcheck.SetServingStatus(system, next)
-			// Simulate the changes in server health, take turns from unhealthy to healthy
-			if next == healthpb.HealthCheckResponse_SERVING {
-				next = healthpb.HealthCheckResponse_NOT_SERVING
-			} else {
-				next = healthpb.HealthCheckResponse_SERVING
-			}
-			time.Sleep(*sleep)
-		}
-	}()
-}
-
-// logger is to mock a sophisticated logging system. To simplify the example, we just print out the content.
-func logger(format string, a ...interface{}) {
-	fmt.Printf("LOG:\t"+format+"\n", a...)
-}
-
-func unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, errMissingMetadata
-	}
-	if !valid(md["authorization"]) {
-		return nil, errInvalidToken
-	}
-	m, err := handler(ctx, req)
-	if err != nil {
-		logger("error: %v", err)
-	}
-	return m, err
-}
-
-// wrappedStream wraps around the embedded grpc.ServerStream, and intercepts the RecvMsg and
-// SendMsg method call.
-type wrappedStream struct {
-	grpc.ServerStream
-}
-
-// HOC, or Decorator on the ServerStream interface
-func (w *wrappedStream) RecvMsg(m interface{}) error {
-	logger("Received message: %v", m)
-	return w.ServerStream.RecvMsg(m)
-}
-
-func (w *wrappedStream) SendMsg(m interface{}) error {
-	logger("Sending message: %v", m)
-	return w.ServerStream.SendMsg(m)
-}
-
-func newWrappedStream(s grpc.ServerStream) grpc.ServerStream {
-	return &wrappedStream{s}
-}
-
-func streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	md, ok := metadata.FromIncomingContext(ss.Context())
-	if !ok {
-		return errMissingMetadata
-	}
-	if !valid(md["authorization"]) {
-		return errInvalidToken
-	}
-	// Interceptor has to call the handler itself
-	err := handler(srv, newWrappedStream(ss))
-
-	if err != nil {
-		logger("error: %v", err)
-	}
-	return err
+	log.Println("return unavailable res count", s.reqCounter)
+	return status.Errorf(codes.Unavailable, "maybeFailRequest: failing it")
 }
 
 func startServer(addr string, opts []grpc.ServerOption) {
@@ -350,6 +234,10 @@ func startServer(addr string, opts []grpc.ServerOption) {
 	pb.RegisterEchoServer(s, &ecServer{
 		addr:  addr,
 		count: make(map[string]int),
+		// Configure server to pass every fourth RPC;
+		// client is configured to make four attempts.
+		// reqCounter: 0,
+		// reqModulo:  4,
 	})
 	hwpb.RegisterGreeterServer(s, &hwServer{})
 	runHealthSvr(s)
@@ -379,7 +267,7 @@ func main() {
 	// pb.RegisterEchoServer(s, &ecServer{
 	// 	count: make(map[string]int),
 	// })
-	// register another service
+	// register another service as multiplex
 	// hwpb.RegisterGreeterServer(s, &hwServer{})
 
 	var wg sync.WaitGroup
