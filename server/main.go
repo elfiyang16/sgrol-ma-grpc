@@ -231,6 +231,7 @@ func startServer(addr string, opts []grpc.ServerOption) {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer(opts...)
+
 	pb.RegisterEchoServer(s, &ecServer{
 		addr:  addr,
 		count: make(map[string]int),
@@ -241,6 +242,7 @@ func startServer(addr string, opts []grpc.ServerOption) {
 	})
 	hwpb.RegisterGreeterServer(s, &hwServer{})
 	runHealthSvr(s)
+	runChannelzSvr()
 	log.Println("Server started at " + addr)
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)

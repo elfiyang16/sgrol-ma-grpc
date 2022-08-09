@@ -183,6 +183,8 @@ func makeRPCs(cc *grpc.ClientConn, n int) {
 func main() {
 	flag.Parse()
 
+	runChannelzSvr()
+
 	conn := dialNormal()
 	// conn := dialRoundRobin()
 	// conn := dialPickFirst()
